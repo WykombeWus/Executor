@@ -15,7 +15,11 @@ add_executable(vector3 vector3.cpp)
 target_include_directories(vector3 PRIVATE ${LUA_INCLUDE_DIR})
 target_link_libraries(vector3 PRIVATE ${LUA_LIBRARIES})
 
-foreach(target executor vector3)
+add_executable(userdata_template userdata_template.cpp)
+target_include_directories(userdata_template PRIVATE ${LUA_INCLUDE_DIR})
+target_link_libraries(userdata_template PRIVATE ${LUA_LIBRARIES})
+
+foreach(target executor vector3 userdata_template)
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4)
     else()

@@ -14,7 +14,7 @@ else
     LUA_LIBS   := -llua5.4
 endif
 
-all: executor vector3
+all: executor vector3 userdata_template
 
 executor: main.cpp
 	$(CXX) $(CXXFLAGS) $(LUA_CFLAGS) main.cpp -o $@ $(LUA_LIBS)
@@ -22,13 +22,19 @@ executor: main.cpp
 vector3: vector3.cpp
 	$(CXX) $(CXXFLAGS) $(LUA_CFLAGS) vector3.cpp -o $@ $(LUA_LIBS)
 
+userdata_template: userdata_template.cpp
+	$(CXX) $(CXXFLAGS) $(LUA_CFLAGS) userdata_template.cpp -o $@ $(LUA_LIBS)
+
 run: executor
 	./executor
 
 run-vector3: vector3
 	./vector3
 
-clean:
-	rm -f executor vector3
+run-userdata: userdata_template
+	./userdata_template
 
-.PHONY: all run run-vector3 clean
+clean:
+	rm -f executor vector3 userdata_template
+
+.PHONY: all run run-vector3 run-userdata clean
