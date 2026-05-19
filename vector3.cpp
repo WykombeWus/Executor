@@ -1,23 +1,18 @@
 // =============================================================================
-//  Exposing a C++ class to Lua: Vector3
+//  Exposing a C++ class to Lua: Vector3 (production-style binding)
 // -----------------------------------------------------------------------------
-//  Demonstrates the canonical "userdata + metatable" binding pattern:
+//  Same behavior as the previous example, refactored to the idiomatic
+//  table-driven registration pattern used in production Lua bindings:
 //
-//    * Full userdata holds the C++ object's bytes; Lua manages its lifetime.
-//    * A metatable named "Vector3" is registered once with luaL_newmetatable.
-//    * __index   handles property reads  (v.x)         and method dispatch (v:length())
-//    * __newindex handles property writes (v.y = 50)
-//    * __gc      runs the C++ destructor when Lua collects the object
-//    * __tostring gives `print(v)` a nice format
-//    * __add     overloads the + operator (v + w)
+//    * `luaL_Reg` arrays declare methods and metamethods as data, not code.
+//    * `luaL_setfuncs` walks an array and registers every entry into the table
+//      currently on top of the stack, optionally with shared upvalues.
+//    * `luaL_newlib`  builds the module table for the constructor.
 //
-//  Lua usage (the script we run at the bottom of main):
-//      local v = Vector3.new(10, 20, 30)
-//      print(v.x)           --> 10
-//      v.y = 50
-//      print(v.y)           --> 50
-//      print(v:length())    --> sqrt(10*10 + 50*50 + 30*30)
-//      print(v + Vector3.new(1, 2, 3))
+//  Trick that makes this clean: every metamethod is registered with the
+//  *methods* table as a shared upvalue. Only `__index` actually consults it
+//  (for `v:Magnitude()`-style dispatch); the others ignore the upvalue.
+//  This keeps everything declarative without losing property access (v.x).
 //
 //  Build:  g++ -std=c++17 -Wall -Wextra vector3.cpp -o vector3 -llua -lm -ldl
 // =============================================================================
@@ -34,114 +29,83 @@ extern "C" {
 }
 
 // -----------------------------------------------------------------------------
-// The C++ class we want to expose. Kept simple for clarity, but it could be
-// any class with constructors, virtual functions, etc.
+// The C++ class we're binding.
 // -----------------------------------------------------------------------------
 struct Vector3 {
     double x, y, z;
 
     Vector3(double x_, double y_, double z_) : x(x_), y(y_), z(z_) {}
-    double length() const { return std::sqrt(x * x + y * y + z * z); }
+
+    double magnitude() const { return std::sqrt(x*x + y*y + z*z); }
+    double dot(const Vector3& o) const { return x*o.x + y*o.y + z*o.z; }
 };
 
-// A unique string used as the metatable's name in the Lua registry.
-// Using a constant avoids typos and is the standard idiom.
+// Registry key for the metatable. Constants beat scattered string literals.
 static const char* VECTOR3_MT = "Vector3";
 
 // -----------------------------------------------------------------------------
-// Helper: validate that stack slot `idx` is a Vector3 userdata and return a
-// typed pointer. luaL_checkudata raises a Lua error if the metatable doesn't
-// match - this is what stops a Lua script from passing some other userdata
-// (or a number, or nil) to a Vector3 method.
+// Stack helpers
 // -----------------------------------------------------------------------------
 static Vector3* check_vector3(lua_State* L, int idx)
 {
-    void* ud = luaL_checkudata(L, idx, VECTOR3_MT);
-    return static_cast<Vector3*>(ud);
+    return static_cast<Vector3*>(luaL_checkudata(L, idx, VECTOR3_MT));
 }
 
-// Helper that constructs a fresh Vector3 userdata on top of the stack and
-// attaches the metatable. Used by Vector3.new and operator+.
+// Construct a fresh Vector3 userdata on top of the stack.
 static Vector3* push_new_vector3(lua_State* L, double x, double y, double z)
 {
-    // lua_newuserdata allocates Lua-managed memory of the requested size and
-    // pushes a userdata value referencing it. We then placement-new our C++
-    // object into that memory so its constructor actually runs.
     void* mem = lua_newuserdata(L, sizeof(Vector3));
     Vector3* v = new (mem) Vector3(x, y, z);
-
-    // Attach the metatable so Lua knows this userdata's type.
     luaL_getmetatable(L, VECTOR3_MT);
-    lua_setmetatable(L, -2);     // pops the metatable, leaves userdata on top
+    lua_setmetatable(L, -2);
     return v;
 }
 
-// -----------------------------------------------------------------------------
-// Vector3.new(x, y, z) -- the constructor exposed to Lua
-// -----------------------------------------------------------------------------
-static int vector3_new(lua_State* L)
-{
-    double x = luaL_checknumber(L, 1);
-    double y = luaL_checknumber(L, 2);
-    double z = luaL_checknumber(L, 3);
-    push_new_vector3(L, x, y, z);
-    return 1;   // we pushed one value (the userdata)
-}
+// =============================================================================
+// Methods - exposed as v:Method(...) in Lua
+// =============================================================================
 
-// -----------------------------------------------------------------------------
-// __gc -- runs when Lua's garbage collector reclaims the userdata.
-// We must invoke the destructor manually because we used placement new.
-// -----------------------------------------------------------------------------
-static int vector3_gc(lua_State* L)
+static int vector3_magnitude(lua_State* L)
 {
     Vector3* v = check_vector3(L, 1);
-    v->~Vector3();
-    return 0;
-}
-
-// -----------------------------------------------------------------------------
-// __tostring -- called by `print(v)` and `tostring(v)`.
-// -----------------------------------------------------------------------------
-static int vector3_tostring(lua_State* L)
-{
-    Vector3* v = check_vector3(L, 1);
-    lua_pushfstring(L, "Vector3(%f, %f, %f)", v->x, v->y, v->z);
+    lua_pushnumber(L, v->magnitude());
     return 1;
 }
 
-// -----------------------------------------------------------------------------
-// __add -- called for `a + b` when either operand has this metamethod.
-// -----------------------------------------------------------------------------
-static int vector3_add(lua_State* L)
+static int vector3_dot(lua_State* L)
 {
     Vector3* a = check_vector3(L, 1);
     Vector3* b = check_vector3(L, 2);
-    push_new_vector3(L, a->x + b->x, a->y + b->y, a->z + b->z);
+    lua_pushnumber(L, a->dot(*b));
     return 1;
 }
 
-// -----------------------------------------------------------------------------
-// Method: v:length()
-// In Lua, `v:length()` desugars to `v.length(v)`, so the userdata is arg 1.
-// -----------------------------------------------------------------------------
-static int vector3_length(lua_State* L)
+static int vector3_normalize(lua_State* L)
 {
     Vector3* v = check_vector3(L, 1);
-    lua_pushnumber(L, v->length());
+    double m = v->magnitude();
+    if (m == 0.0) {
+        return luaL_error(L, "cannot normalize a zero-length vector");
+    }
+    push_new_vector3(L, v->x / m, v->y / m, v->z / m);
     return 1;
 }
 
-// -----------------------------------------------------------------------------
-// __index handler.
-//
-// In Lua, `v.x` triggers __index with key = "x". We split behavior:
-//   * If the key is a known field name (x/y/z), return the field value.
-//   * Otherwise look the key up in a "methods" table (upvalue 1) so that
-//     `v:length()` resolves to the C function we registered.
-//
-// Stashing the methods table as an upvalue of the closure is cleaner than
-// a global lookup and avoids polluting the metatable itself.
-// -----------------------------------------------------------------------------
+static int vector3_scale(lua_State* L)
+{
+    Vector3* v = check_vector3(L, 1);
+    double s = luaL_checknumber(L, 2);
+    push_new_vector3(L, v->x * s, v->y * s, v->z * s);
+    return 1;
+}
+
+// =============================================================================
+// Metamethods
+// =============================================================================
+
+// __index: properties first, then fall back to the methods table.
+// The methods table is shared upvalue 1 (set up by luaL_setfuncs in
+// register_vector3 below).
 static int vector3_index(lua_State* L)
 {
     Vector3* v = check_vector3(L, 1);
@@ -151,16 +115,14 @@ static int vector3_index(lua_State* L)
     if (std::strcmp(key, "y") == 0) { lua_pushnumber(L, v->y); return 1; }
     if (std::strcmp(key, "z") == 0) { lua_pushnumber(L, v->z); return 1; }
 
-    // Method lookup: methods_table[key]
-    lua_pushvalue(L, lua_upvalueindex(1));   // push methods table
-    lua_pushvalue(L, 2);                     // push the key
-    lua_rawget(L, -2);                       // methods[key], leaves nil if absent
+    // methods[key] - returns nil if no such method, which Lua will surface
+    // as a normal "attempt to call a nil value" if the user mistypes.
+    lua_pushvalue(L, lua_upvalueindex(1));
+    lua_pushvalue(L, 2);
+    lua_rawget(L, -2);
     return 1;
 }
 
-// -----------------------------------------------------------------------------
-// __newindex handler -- assignments like `v.y = 50`.
-// -----------------------------------------------------------------------------
 static int vector3_newindex(lua_State* L)
 {
     Vector3* v = check_vector3(L, 1);
@@ -171,58 +133,129 @@ static int vector3_newindex(lua_State* L)
     if (std::strcmp(key, "y") == 0) { v->y = val; return 0; }
     if (std::strcmp(key, "z") == 0) { v->z = val; return 0; }
 
-    // Reject unknown fields with a Lua error rather than silently allowing them.
     return luaL_error(L, "Vector3 has no field '%s'", key);
 }
 
+static int vector3_gc(lua_State* L)
+{
+    Vector3* v = check_vector3(L, 1);
+    v->~Vector3();
+    return 0;
+}
+
+static int vector3_tostring(lua_State* L)
+{
+    Vector3* v = check_vector3(L, 1);
+    lua_pushfstring(L, "Vector3(%f, %f, %f)", v->x, v->y, v->z);
+    return 1;
+}
+
+static int vector3_add(lua_State* L)
+{
+    Vector3* a = check_vector3(L, 1);
+    Vector3* b = check_vector3(L, 2);
+    push_new_vector3(L, a->x + b->x, a->y + b->y, a->z + b->z);
+    return 1;
+}
+
+static int vector3_sub(lua_State* L)
+{
+    Vector3* a = check_vector3(L, 1);
+    Vector3* b = check_vector3(L, 2);
+    push_new_vector3(L, a->x - b->x, a->y - b->y, a->z - b->z);
+    return 1;
+}
+
+static int vector3_eq(lua_State* L)
+{
+    Vector3* a = check_vector3(L, 1);
+    Vector3* b = check_vector3(L, 2);
+    lua_pushboolean(L, a->x == b->x && a->y == b->y && a->z == b->z);
+    return 1;
+}
+
+// =============================================================================
+// Module-level constructor: Vector3.new(x, y, z)
+// =============================================================================
+static int vector3_new(lua_State* L)
+{
+    double x = luaL_checknumber(L, 1);
+    double y = luaL_checknumber(L, 2);
+    double z = luaL_checknumber(L, 3);
+    push_new_vector3(L, x, y, z);
+    return 1;
+}
+
+// =============================================================================
+// Registration arrays - this is the heart of the production-style pattern.
+// Each entry is { lua_name, c_function }. The list MUST end with {NULL, NULL}
+// so luaL_setfuncs / luaL_newlib know where it stops.
+// =============================================================================
+
+static const luaL_Reg vector3_methods[] = {
+    {"Magnitude", vector3_magnitude},
+    {"Dot",       vector3_dot},
+    {"Normalize", vector3_normalize},
+    {"Scale",     vector3_scale},
+    {nullptr,     nullptr}
+};
+
+static const luaL_Reg vector3_metamethods[] = {
+    {"__index",    vector3_index},
+    {"__newindex", vector3_newindex},
+    {"__gc",       vector3_gc},
+    {"__tostring", vector3_tostring},
+    {"__add",      vector3_add},
+    {"__sub",      vector3_sub},
+    {"__eq",       vector3_eq},
+    {nullptr,      nullptr}
+};
+
+// Module table - the value bound to the global name "Vector3".
+static const luaL_Reg vector3_module[] = {
+    {"new", vector3_new},
+    {nullptr, nullptr}
+};
+
 // -----------------------------------------------------------------------------
-// Register the Vector3 type and its constructor table with the Lua state.
-// Call this once, right after luaL_openlibs.
+// register_vector3 - call once, after luaL_openlibs.
+//
+// Stack discipline is the whole story here. Each annotated step shows the
+// stack from bottom (left) to top (right); [] means empty.
 // -----------------------------------------------------------------------------
 static void register_vector3(lua_State* L)
 {
-    // ---- 1. Build the metatable -------------------------------------------
-    // luaL_newmetatable creates a fresh table in the registry under the given
-    // name and pushes it. If a metatable with this name already exists it
-    // pushes the existing one and returns 0 (useful for idempotent setup).
-    luaL_newmetatable(L, VECTOR3_MT);          // stack: [mt]
+    // 1. Create (or fetch) the metatable in the registry.
+    luaL_newmetatable(L, VECTOR3_MT);              // [mt]
 
-    // ---- 2. Methods table (for v:length(), v:dot(), etc.) -----------------
-    lua_newtable(L);                           // stack: [mt, methods]
-    lua_pushcfunction(L, vector3_length);
-    lua_setfield(L, -2, "length");             // methods.length = vector3_length
+    // 2. Build the methods table and populate it via luaL_setfuncs.
+    //    luaL_setfuncs(L, regs, nup) registers every entry of `regs` into
+    //    the table on top of the stack, sharing `nup` upvalues among them.
+    //    With nup == 0 it's a plain bulk lua_pushcfunction + lua_setfield.
+    lua_newtable(L);                               // [mt, methods]
+    luaL_setfuncs(L, vector3_methods, 0);          // [mt, methods]
 
-    // __index = closure(vector3_index) with `methods` captured as upvalue 1.
-    // After lua_pushcclosure the methods table is consumed and replaced by
-    // the closure value on the stack.
-    lua_pushcclosure(L, vector3_index, 1);     // stack: [mt, __index_closure]
-    lua_setfield(L, -2, "__index");            // mt.__index = closure
+    // 3. Register the metamethods into `mt`, with `methods` as a shared
+    //    upvalue (so __index can find it via lua_upvalueindex(1)).
+    //
+    //    luaL_setfuncs expects:
+    //      stack: [..., target_table, upvalue_1, ..., upvalue_N]
+    //    It pops the upvalues after registration, leaving target_table.
+    //
+    //    Right now the stack is [mt, methods], so `mt` is the target and
+    //    `methods` is the single upvalue - exactly what we want.
+    luaL_setfuncs(L, vector3_metamethods, 1);      // [mt]   (methods popped)
 
-    // ---- 3. The remaining metamethods -------------------------------------
-    lua_pushcfunction(L, vector3_newindex);
-    lua_setfield(L, -2, "__newindex");
+    lua_pop(L, 1);                                 // []     (drop mt)
 
-    lua_pushcfunction(L, vector3_gc);
-    lua_setfield(L, -2, "__gc");
-
-    lua_pushcfunction(L, vector3_tostring);
-    lua_setfield(L, -2, "__tostring");
-
-    lua_pushcfunction(L, vector3_add);
-    lua_setfield(L, -2, "__add");
-
-    lua_pop(L, 1);                             // stack: []  (drop metatable)
-
-    // ---- 4. Global "Vector3" table containing the constructor -------------
-    // After this, Lua code can call Vector3.new(x, y, z).
-    lua_newtable(L);                           // stack: [Vector3]
-    lua_pushcfunction(L, vector3_new);
-    lua_setfield(L, -2, "new");                // Vector3.new = vector3_new
-    lua_setglobal(L, "Vector3");               // _G.Vector3 = table
+    // 4. Build the module table {new = vector3_new} and bind it to _G.Vector3.
+    //    luaL_newlib creates a fresh table sized for the array and fills it.
+    luaL_newlib(L, vector3_module);                // [Vector3]
+    lua_setglobal(L, "Vector3");                   // []
 }
 
 // -----------------------------------------------------------------------------
-// Driver: open Lua, register the binding, run a demo script.
+// Demo
 // -----------------------------------------------------------------------------
 int main()
 {
@@ -231,25 +264,28 @@ int main()
     register_vector3(L);
 
     static const char* script = R"LUA(
-        local v = Vector3.new(10, 20, 30)
-        print("v.x =", v.x)        -- 10
-        print("v.y =", v.y)        -- 20
-        print("v.z =", v.z)        -- 30
+        local v = Vector3.new(3, 4, 12)
+        print("v.x, v.y, v.z =", v.x, v.y, v.z)
+        print("v:Magnitude() =", v:Magnitude())   -- sqrt(9+16+144) = 13
 
         v.y = 50
         print("after v.y = 50 ->", v.y)
 
-        print("tostring(v) =", tostring(v))
-        print("v:length() =",   v:length())
+        local w = Vector3.new(1, 0, 0)
+        print("v:Dot(w) =", v:Dot(w))             -- 3
 
-        local w = Vector3.new(1, 2, 3)
-        local sum = v + w
-        print("v + w =",        sum)
-        print("(v+w).x =",      sum.x)
+        local n = Vector3.new(3, 0, 4):Normalize()
+        print("Normalize(3,0,4) =", n, " mag=", n:Magnitude())
 
-        -- Type safety: this raises a Lua error caught by pcall.
+        print("v + w =",  v + w)
+        print("v - w =",  v - w)
+        print("v == Vector3.new(3, 50, 12) =",
+              v == Vector3.new(3, 50, 12))
+
+        print("v:Scale(2) =", v:Scale(2))
+
         local ok, err = pcall(function() v.bogus = 1 end)
-        print("setting unknown field -> ok =", ok, " err =", err)
+        print("v.bogus = 1 ->", ok, err)
     )LUA";
 
     if (luaL_dostring(L, script) != LUA_OK) {
