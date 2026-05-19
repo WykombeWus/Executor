@@ -14,13 +14,21 @@ else
     LUA_LIBS   := -llua5.4
 endif
 
+all: executor vector3
+
 executor: main.cpp
 	$(CXX) $(CXXFLAGS) $(LUA_CFLAGS) main.cpp -o $@ $(LUA_LIBS)
+
+vector3: vector3.cpp
+	$(CXX) $(CXXFLAGS) $(LUA_CFLAGS) vector3.cpp -o $@ $(LUA_LIBS)
 
 run: executor
 	./executor
 
-clean:
-	rm -f executor
+run-vector3: vector3
+	./vector3
 
-.PHONY: run clean
+clean:
+	rm -f executor vector3
+
+.PHONY: all run run-vector3 clean
