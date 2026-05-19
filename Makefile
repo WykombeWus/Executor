@@ -14,7 +14,7 @@ else
     LUA_LIBS   := -llua5.4
 endif
 
-all: executor vector3 userdata_template class_builder
+all: executor vector3 userdata_template class_builder sandbox
 
 executor: main.cpp
 	$(CXX) $(CXXFLAGS) $(LUA_CFLAGS) main.cpp -o $@ $(LUA_LIBS)
@@ -28,6 +28,9 @@ userdata_template: userdata_template.cpp
 class_builder: class_builder.cpp
 	$(CXX) $(CXXFLAGS) $(LUA_CFLAGS) class_builder.cpp -o $@ $(LUA_LIBS)
 
+sandbox: sandbox.cpp lua_binding.hpp
+	$(CXX) $(CXXFLAGS) $(LUA_CFLAGS) sandbox.cpp -o $@ $(LUA_LIBS)
+
 run: executor
 	./executor
 
@@ -40,7 +43,10 @@ run-userdata: userdata_template
 run-builder: class_builder
 	./class_builder
 
-clean:
-	rm -f executor vector3 userdata_template class_builder
+run-sandbox: sandbox
+	./sandbox
 
-.PHONY: all run run-vector3 run-userdata run-builder clean
+clean:
+	rm -f executor vector3 userdata_template class_builder sandbox
+
+.PHONY: all run run-vector3 run-userdata run-builder run-sandbox clean
